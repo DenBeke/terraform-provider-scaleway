@@ -3,8 +3,11 @@ package scaleway
 import (
 	"fmt"
 	"log"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
 )
@@ -17,26 +20,36 @@ func init() {
 }
 
 func testSweepBucket(region string) error {
-	scaleway, err := sharedDeprecatedClientForRegion(region)
+
+	log.Println(region)
+
+	s3client, err := sharedS3Client(region)
 	if err != nil {
 		return fmt.Errorf("error getting client: %s", err)
 	}
 
-	log.Printf("[DEBUG] Destroying the buckets in (%s)", region)
-
-	containers, err := scaleway.GetContainers()
+	listBucketResponse, err := s3client.ListBuckets(&s3.ListBucketsInput{})
 	if err != nil {
-		return fmt.Errorf("Error describing buckets in Sweeper: %s", err)
+		return fmt.Errorf("couldn't list buckets: %s", err)
 	}
 
-	for _, c := range containers {
-		if err := scaleway.DeleteBucket(c.Name); err != nil {
-			return fmt.Errorf("Error deleting bucket in Sweeper: %s", err)
+	for _, bucket := range listBucketResponse.Buckets {
+		log.Println(*bucket.Name)
+		if strings.HasPrefix(*bucket.Name, "terraform-test") {
+			_, err := s3client.DeleteBucket(&s3.DeleteBucketInput{
+				Bucket: bucket.Name,
+			})
+			if err != nil {
+				return fmt.Errorf("Error deleting bucket in Sweeper: %s", err)
+			}
 		}
+
 	}
 
 	return nil
 }
+
+var testBucketName = fmt.Sprintf("terraform-test-%d", time.Now().Unix())
 
 func TestAccScalewayBucket(t *testing.T) {
 	resource.Test(t, resource.TestCase{
@@ -47,7 +60,7 @@ func TestAccScalewayBucket(t *testing.T) {
 			{
 				Config: testAccCheckScalewayBucket,
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("scaleway_bucket.base", "name", "terraform-test"),
+					resource.TestCheckResourceAttr("scaleway_bucket.base", "name", testBucketName),
 				),
 			},
 		},
@@ -72,8 +85,8 @@ func testAccCheckScalewayBucketDestroy(s *terraform.State) error {
 	return nil
 }
 
-var testAccCheckScalewayBucket = `
+var testAccCheckScalewayBucket = fmt.Sprintf(`
 resource "scaleway_bucket" "base" {
-  name = "terraform-test"
+  name = "%s"
 }
-`
+`, testBucketName)

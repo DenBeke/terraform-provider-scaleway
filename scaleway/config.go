@@ -13,6 +13,10 @@ import (
 	"sort"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	retryablehttp "github.com/hashicorp/go-retryablehttp"
 	"github.com/hashicorp/terraform/helper/logging"
 	sdk "github.com/nicolai86/scaleway-sdk"
@@ -29,6 +33,7 @@ type Config struct {
 //
 // This meta value is passed into all resources.
 type Meta struct {
+	s3Client *s3.S3
 	// Deprecated: The deprecated Scaleway SDK (will be removed in `v2.0.0`).
 	deprecatedClient *sdk.API
 }
@@ -42,6 +47,12 @@ func (c *Config) Meta() (*Meta, error) {
 		return nil, fmt.Errorf("error: cannot create deprecated client: %s", err)
 	}
 	meta.deprecatedClient = deprecatedClient
+
+	s3Client, err := c.GetS3Client()
+	if err != nil {
+		return nil, fmt.Errorf("error: cannot create s3 client: %s", err)
+	}
+	meta.s3Client = s3Client
 
 	// fetch known scaleway server types to support validation in r/server
 	if len(commercialServerTypes) == 0 {
@@ -82,7 +93,7 @@ func (c *client) Do(r *http.Request) (*http.Response, error) {
 	return c.Client.Do(req)
 }
 
-// GetDeprecatedClient create a new deprecated client from a configuration.
+// GetDeprecatedClient creates a new deprecated client from a configuration.
 func (c *Config) GetDeprecatedClient() (*sdk.API, error) {
 	options := func(sdkApi *sdk.API) {
 		cl := retryablehttp.NewClient()
@@ -113,6 +124,46 @@ func (c *Config) GetDeprecatedClient() (*sdk.API, error) {
 	)
 }
 
+var s3AccessKey string
+
+// GetS3Client creates a new s3 client from the configuration.
+func (c *Config) GetS3Client() (*s3.S3, error) {
+
+	if s3AccessKey == "" {
+		scwClient, err := c.GetDeprecatedClient()
+		if err != nil {
+			return nil, err
+		}
+
+		s3AccessKey, err = c.getAccessKeyFromSecretKey(scwClient)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	config := &aws.Config{}
+
+	var region string
+	if c.Region == "ams1" {
+		region = "nl-ams"
+	}
+	if c.Region == "par1" {
+		region = "fr-par"
+	}
+
+	config.WithRegion(region)
+	config.WithCredentials(credentials.NewStaticCredentials(s3AccessKey, c.APIKey, ""))
+	config.WithEndpoint("https://s3." + region + ".scw.cloud")
+
+	s, err := session.NewSession(config)
+	if err != nil {
+		return nil, err
+	}
+	s3client := s3.New(s)
+
+	return s3client, nil
+}
+
 // deprecatedScalewayConfig is the structure of the deprecated Scaleway config file.
 type deprecatedScalewayConfig struct {
 	Organization string `json:"organization"`
@@ -133,4 +184,42 @@ func readDeprecatedScalewayConfig(path string) (string, string, error) {
 		return "", "", err
 	}
 	return data.Token, data.Organization, nil
+}
+
+// getAccessKeyFromSecretKey returns the access key that is coupled to the current token/secret key in the client.
+func (c *Config) getAccessKeyFromSecretKey(scwClient *sdk.API) (string, error) {
+	type token struct {
+		AccessKey string `json:"access_key"`
+	}
+
+	type resBody struct {
+		Token token `json:"token"`
+	}
+
+	url := "https://account.scaleway.com/tokens/" + c.APIKey
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	res, err := scwClient.Client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+
+	body, err := ioutil.ReadAll(res.Body)
+	defer res.Body.Close()
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(string(body))
+
+	content := &resBody{}
+	err = json.Unmarshal(body, content)
+	if err != nil {
+		panic(err)
+	}
+
+	return content.Token.AccessKey, nil
 }
